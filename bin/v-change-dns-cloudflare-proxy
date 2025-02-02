@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Include hestia functions
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+#----------------------------------------------------------#
+#                    Variable&Function                       #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+record_name=$3
+status=${4:-yes}  # Default to enabled
+
+# Includes
+source $HESTIA/conf/hestia.conf
+
+check_args '3' "$#" 'USER DOMAIN RECORD [STATUS]'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+
+# Validate status
+if [ "$status" != "yes" ] && [ "$status" != "no" ]; then
+    check_result $E_INVALID "Invalid proxy status (valid: yes,no)"
+fi
+
+# Create PHP wrapper for proxy status change
+php_script=$(cat <<EOF
+<?php
+require_once '/usr/local/hestia/web/src/init.php';
+require_once '/usr/local/hestia/web/src/app/System/CloudflareAPI.php';
+
+// Read config file
+\$config_file = '/usr/local/hestia/data/users/$user/cloudflare/cloudflare.conf';
+if (!file_exists(\$config_file)) {
+    exit(1);
+}
+
+\$config = parse_ini_file(\$config_file);
+if (!\$config || !isset(\$config['API_TOKEN'])) {
+    exit(1);
+}
+
+// Initialize API
+\$api = new \Hestia\System\CloudflareAPI(\$config['API_TOKEN']);
+
+// Get zone ID
+\$zoneId = \$api->getZoneId('$domain');
+if (\$zoneId === false) {
+    fwrite(STDERR, "Zone not found for domain: $domain\n");
+    exit(1);
+}
+
+// Get DNS records
+\$records = \$api->listDnsRecords(\$zoneId);
+if (\$records === false) {
+    fwrite(STDERR, "Failed to get DNS records: " . \$api->getLastError() . "\n");
+    exit(1);
+}
+
+// Find the specific record
+\$record_name = '$record_name' === '@' ? '$domain' : '$record_name.$domain';
+\$record = null;
+
+foreach (\$records as \$r) {
+    if (\$r['name'] === \$record_name) {
+        \$record = \$r;
+        break;
+    }
+}
+
+if (\$record === null) {
+    fwrite(STDERR, "Record not found: \$record_name\n");
+    exit(1);
+}
+
+// Check if record type supports proxying
+\$proxyable_types = ['A', 'AAAA', 'CNAME'];
+if (!in_array(\$record['type'], \$proxyable_types)) {
+    fwrite(STDERR, "Record type '\$record[type]' does not support Cloudflare proxy\n");
+    exit(1);
+}
+
+// Update proxy status
+\$data = [
+    'type' => \$record['type'],
+    'name' => \$record['name'],
+    'content' => \$record['content'],
+    'ttl' => \$record['ttl'],
+    'proxied' => '$status' === 'yes'
+];
+
+if (!\$api->updateDnsRecord(\$zoneId, \$record['id'], \$data)) {
+    fwrite(STDERR, "Failed to update record: " . \$api->getLastError() . "\n");
+    exit(1);
+}
+
+echo json_encode([
+    'status' => 'success',
+    'record' => [
+        'name' => \$record['name'],
+        'type' => \$record['type'],
+        'proxied' => '$status' === 'yes'
+    ]
+], JSON_PRETTY_PRINT);
+EOF
+)
+
+# Execute PHP script
+result=$(echo "$php_script" | php)
+if [ $? -ne 0 ]; then
+    check_result $E_CONNECT "Failed to change proxy status"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                              #
+#----------------------------------------------------------#
+
+# Logging
+status_text="enabled"
+if [ "$status" = "no" ]; then
+    status_text="disabled"
+fi
+
+$BIN/v-log-action "$user" "Info" "DNS" "Cloudflare proxy $status_text for $record_name.$domain"
+
+# Print results
+echo "$result"
+
+exit

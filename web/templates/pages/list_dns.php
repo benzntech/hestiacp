@@ -6,6 +6,9 @@
 				<a href="/add/dns/" class="button button-secondary js-button-create">
 					<i class="fas fa-circle-plus icon-green"></i><?= _("Add DNS Domain") ?>
 				</a>
+				<a href="/edit/cloudflare/" class="button button-secondary">
+					<i class="fas fa-cloud icon-blue"></i><?= _("Cloudflare Settings") ?>
+				</a>
 			<?php } ?>
 		</div>
 		<div class="toolbar-right">
@@ -82,6 +85,7 @@
 			<div class="units-table-cell u-text-center"><?= _("TTL") ?></div>
 			<div class="units-table-cell u-text-center"><?= _("SOA") ?></div>
 			<div class="units-table-cell u-text-center"><?= _("DNSSEC") ?></div>
+			<div class="units-table-cell u-text-center"><?= _("Cloudflare") ?></div>
 			<div class="units-table-cell u-text-center"><?= _("Expiration Date") ?></div>
 		</div>
 
@@ -174,6 +178,55 @@
 										</a>
 									</li>
 								<?php } ?>
+								<?php
+								// Check Cloudflare status
+								$cf_config = '/usr/local/hestia/data/users/'.$user.'/cloudflare/cloudflare.conf';
+								$cloudflare_enabled = file_exists($cf_config);
+								
+								if ($cloudflare_enabled) {
+									exec(HESTIA_CMD."v-list-cloudflare-zones ".$user." json", $output, $return_var);
+									$zones = [];
+									if ($return_var == 0 && !empty($output[0])) {
+										$zones = json_decode($output[0], true);
+									}
+									
+									$domain_on_cloudflare = false;
+									foreach ($zones as $zone) {
+										if ($zone['name'] === $key) {
+											$domain_on_cloudflare = true;
+											break;
+										}
+									}
+									
+									if ($domain_on_cloudflare) {
+										// Show sync button
+										?>
+										<li class="units-table-row-action">
+											<a class="units-table-row-action-link"
+											   href="/list/dns/?domain=<?=htmlentities($key)?>&cloudflare=sync&token=<?=$_SESSION['token']?>"
+											   title="<?=_('Sync with Cloudflare')?>">
+												<i class="fas fa-sync-alt icon-blue"></i>
+												<span class="u-hide-desktop"><?=_('Sync with Cloudflare')?></span>
+											</a>
+										</li>
+										<?php
+									} else {
+										// Show add to Cloudflare button
+										?>
+										<li class="units-table-row-action">
+											<a class="units-table-row-action-link js-confirm-action"
+											   href="/list/dns/?domain=<?=htmlentities($key)?>&cloudflare=add&token=<?=$_SESSION['token']?>"
+											   title="<?=_('Add to Cloudflare')?>"
+											   data-confirm-title="<?=_('Add to Cloudflare')?>"
+											   data-confirm-message="<?=sprintf(_('Are you sure you want to add %s to Cloudflare?'), $key)?>">
+												<i class="fas fa-cloud-upload-alt icon-blue"></i>
+												<span class="u-hide-desktop"><?=_('Add to Cloudflare')?></span>
+											</a>
+										</li>
+										<?php
+									}
+								}
+								?>
 							<?php } ?>
 							<li class="units-table-row-action shortcut-l" data-key-action="href">
 								<a
@@ -237,6 +290,41 @@
 				<div class="units-table-cell u-text-center-desktop">
 					<span class="u-hide-desktop u-text-bold"><?= _("DNSSEC") ?>:</span>
 					<i class="fas <?= $dnssec_icon ?>" title="<?= $dnssec_title ?>"></i>
+				</div>
+				<div class="units-table-cell u-text-center-desktop">
+					<span class="u-hide-desktop u-text-bold"><?= _("Cloudflare") ?>:</span>
+					<?php
+					$cf_config = '/usr/local/hestia/data/users/'.$user.'/cloudflare/cloudflare.conf';
+					$cloudflare_enabled = file_exists($cf_config);
+					
+					if ($cloudflare_enabled) {
+						exec(HESTIA_CMD."v-list-cloudflare-zones ".$user." json", $output, $return_var);
+						$zones = [];
+						if ($return_var == 0 && !empty($output[0])) {
+							$zones = json_decode($output[0], true);
+						}
+						
+						$domain_on_cloudflare = false;
+						$zone_status = '';
+						foreach ($zones as $zone) {
+							if ($zone['name'] === $key) {
+								$domain_on_cloudflare = true;
+								$zone_status = $zone['status'];
+								break;
+							}
+						}
+						
+						if ($domain_on_cloudflare) {
+							$cf_status_icon = $zone_status === 'active' ? 'fa-cloud-check icon-green' : 'fa-cloud-clock icon-orange';
+							$cf_status_title = $zone_status === 'active' ? _('Active on Cloudflare') : _('Pending Setup');
+							echo '<i class="fas '.$cf_status_icon.'" title="'.$cf_status_title.'"></i>';
+						} else {
+							echo '<i class="fas fa-cloud-slash icon-grey" title="'._('Not on Cloudflare').'"></i>';
+						}
+					} else {
+						echo '<i class="fas fa-cloud-slash icon-grey" title="'._('Cloudflare not configured').'"></i>';
+					}
+					?>
 				</div>
 				<div class="units-table-cell u-text-center-desktop">
 					<span class="u-hide-desktop u-text-bold"><?= _("Expiration Date") ?>:</span>

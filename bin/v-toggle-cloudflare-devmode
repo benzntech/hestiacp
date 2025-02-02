@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# Include hestia functions
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+#----------------------------------------------------------#
+#                    Variable&Function                       #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+status=${3:-on}  # Default to enabling dev mode
+
+# Includes
+source $HESTIA/conf/hestia.conf
+
+check_args '2' "$#" 'USER DOMAIN [STATUS]'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+
+# Validate status
+if [ "$status" != "on" ] && [ "$status" != "off" ]; then
+    check_result $E_INVALID "Invalid status (valid: on,off)"
+fi
+
+# Create PHP wrapper for development mode toggle
+php_script=$(cat <<EOF
+<?php
+require_once '/usr/local/hestia/web/src/init.php';
+require_once '/usr/local/hestia/web/src/app/System/CloudflareAPI.php';
+
+// Read config file
+\$config_file = '/usr/local/hestia/data/users/$user/cloudflare/cloudflare.conf';
+if (!file_exists(\$config_file)) {
+    exit(1);
+}
+
+\$config = parse_ini_file(\$config_file);
+if (!\$config || !isset(\$config['API_TOKEN'])) {
+    exit(1);
+}
+
+// Initialize API
+\$api = new \Hestia\System\CloudflareAPI(\$config['API_TOKEN']);
+
+// Get zone ID
+\$zoneId = \$api->getZoneId('$domain');
+if (\$zoneId === false) {
+    fwrite(STDERR, "Zone not found for domain: $domain\n");
+    exit(1);
+}
+
+// Toggle development mode
+\$enabled = '$status' === 'on';
+\$result = \$api->updateDevMode(\$zoneId, \$enabled);
+if (\$result === false) {
+    fwrite(STDERR, "Failed to update development mode: " . \$api->getLastError() . "\n");
+    exit(1);
+}
+
+echo json_encode([
+    'status' => 'success',
+    'development_mode' => \$enabled ? 'enabled' : 'disabled',
+    'note' => \$enabled ? 'Development mode will automatically disable after 3 hours' : null
+], JSON_PRETTY_PRINT);
+EOF
+)
+
+# Execute PHP script
+result=$(echo "$php_script" | php)
+if [ $? -ne 0 ]; then
+    check_result $E_CONNECT "Failed to toggle development mode"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                              #
+#----------------------------------------------------------#
+
+# Logging
+status_text="enabled"
+if [ "$status" = "off" ]; then
+    status_text="disabled"
+fi
+
+$BIN/v-log-action "$user" "Info" "System" "Cloudflare development mode $status_text for $domain."
+
+# Print results
+echo "$result"
+
+exit

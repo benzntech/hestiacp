@@ -1,0 +1,192 @@
+#!/bin/bash
+
+# Include hestia functions
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+#----------------------------------------------------------#
+#                    Variable&Function                       #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+
+# Includes
+source $HESTIA/conf/hestia.conf
+
+check_args '2' "$#" 'USER DOMAIN'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+
+# Check if domain exists
+if [ ! -f "$HESTIA/data/users/$user/dns/$domain.conf" ]; then
+    check_result $E_NOTEXIST "DNS domain $domain doesn't exist"
+fi
+
+# Create PHP wrapper for DNS synchronization
+php_script=$(cat <<EOF
+<?php
+require_once '/usr/local/hestia/web/src/init.php';
+require_once '/usr/local/hestia/web/src/app/System/CloudflareAPI.php';
+
+// Read config files
+\$cf_config_file = '/usr/local/hestia/data/users/$user/cloudflare/cloudflare.conf';
+\$dns_config_file = '/usr/local/hestia/data/users/$user/dns/$domain.conf';
+
+if (!file_exists(\$cf_config_file)) {
+    exit(1);
+}
+
+\$config = parse_ini_file(\$cf_config_file);
+if (!\$config || !isset(\$config['API_TOKEN'])) {
+    exit(1);
+}
+
+// Initialize API
+\$api = new \Hestia\System\CloudflareAPI(\$config['API_TOKEN']);
+
+// Get zone ID
+\$zoneId = \$api->getZoneId('$domain');
+if (\$zoneId === false) {
+    fwrite(STDERR, "Zone not found for domain: $domain\n");
+    exit(1);
+}
+
+// Read HestiaCP DNS records
+\$hestia_records = [];
+\$dns_lines = file(\$dns_config_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+foreach (\$dns_lines as \$line) {
+    if (strpos(\$line, 'ID=') !== 0) {
+        \$parts = explode(' ', \$line);
+        if (count(\$parts) >= 4) {
+            \$record = [
+                'type' => \$parts[0],
+                'name' => rtrim(\$parts[1], '.'),
+                'content' => \$parts[3],
+                'ttl' => \$parts[2]
+            ];
+            
+            // Handle special cases
+            if (\$record['type'] === 'MX') {
+                \$record['priority'] = \$parts[3];
+                \$record['content'] = \$parts[4];
+            }
+            
+            // Normalize record name
+            if (\$record['name'] === '@') {
+                \$record['name'] = '$domain';
+            } else {
+                \$record['name'] .= '.$domain';
+            }
+            
+            \$hestia_records[] = \$record;
+        }
+    }
+}
+
+// Get existing Cloudflare records
+\$cf_records = \$api->listDnsRecords(\$zoneId);
+if (\$cf_records === false) {
+    fwrite(STDERR, "Failed to get Cloudflare records: " . \$api->getLastError() . "\n");
+    exit(1);
+}
+
+// Index Cloudflare records by type and name for easy lookup
+\$cf_index = [];
+foreach (\$cf_records as \$record) {
+    \$key = sprintf('%s:%s', \$record['type'], \$record['name']);
+    \$cf_index[\$key] = \$record;
+}
+
+\$stats = [
+    'created' => 0,
+    'updated' => 0,
+    'deleted' => 0,
+    'skipped' => 0
+];
+
+// Sync HestiaCP records to Cloudflare
+foreach (\$hestia_records as \$record) {
+    \$key = sprintf('%s:%s', \$record['type'], \$record['name']);
+    
+    // Skip unsupported record types
+    if (!in_array(\$record['type'], ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV'])) {
+        \$stats['skipped']++;
+        continue;
+    }
+    
+    // Prepare record data
+    \$data = [
+        'type' => \$record['type'],
+        'name' => \$record['name'],
+        'content' => \$record['content'],
+        'ttl' => (int)\$record['ttl'],
+        'proxied' => \$record['type'] === 'A' || \$record['type'] === 'AAAA' || \$record['type'] === 'CNAME'
+    ];
+    
+    if (\$record['type'] === 'MX') {
+        \$data['priority'] = (int)\$record['priority'];
+    }
+    
+    if (isset(\$cf_index[\$key])) {
+        // Update existing record if different
+        \$cf_record = \$cf_index[\$key];
+        \$needs_update = false;
+        
+        foreach (['content', 'ttl', 'proxied'] as \$field) {
+            if (isset(\$data[\$field]) && isset(\$cf_record[\$field]) && \$data[\$field] !== \$cf_record[\$field]) {
+                \$needs_update = true;
+                break;
+            }
+        }
+        
+        if (\$needs_update) {
+            if (\$api->updateDnsRecord(\$zoneId, \$cf_record['id'], \$data)) {
+                \$stats['updated']++;
+            }
+        }
+        
+        // Remove from index so we know what's left to delete
+        unset(\$cf_index[\$key]);
+    } else {
+        // Create new record
+        if (\$api->createDnsRecord(\$zoneId, \$data)) {
+            \$stats['created']++;
+        }
+    }
+}
+
+// Delete Cloudflare records that don't exist in HestiaCP
+foreach (\$cf_index as \$record) {
+    if (\$api->deleteDnsRecord(\$zoneId, \$record['id'])) {
+        \$stats['deleted']++;
+    }
+}
+
+// Output results
+echo json_encode([
+    'status' => 'success',
+    'statistics' => \$stats
+], JSON_PRETTY_PRINT);
+EOF
+)
+
+# Execute PHP script
+result=$(echo "$php_script" | php)
+if [ $? -ne 0 ]; then
+    check_result $E_CONNECT "Failed to sync DNS records with Cloudflare"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                              #
+#----------------------------------------------------------#
+
+# Logging
+$BIN/v-log-action "$user" "Info" "DNS" "Synchronized DNS records for $domain with Cloudflare."
+
+# Print results
+echo "$result"
+
+exit

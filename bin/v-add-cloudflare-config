@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Include hestia functions
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+#----------------------------------------------------------#
+#                    Variable&Function                       #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+token=$2
+
+# Includes
+source $HESTIA/conf/hestia.conf
+
+check_args '2' "$#" 'USER TOKEN'
+is_format_valid 'user' 'token'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+
+#----------------------------------------------------------#
+#                       Action                              #
+#----------------------------------------------------------#
+
+# Create user cloudflare directory if it doesn't exist
+cf_user_dir="$HESTIA/data/users/$user/cloudflare"
+mkdir -p $cf_user_dir
+
+# Copy cloudflare template
+cf_conf="$cf_user_dir/cloudflare.conf"
+cp $HESTIA/install/common/templates/dns/cloudflare.tpl $cf_conf
+
+# Replace template variables
+sed -i "s|%token%|$token|g" $cf_conf
+
+# Set correct permissions
+chmod 660 $cf_conf
+chown $user:$user $cf_conf
+
+# Verify token using PHP class
+result=$($BIN/v-check-cloudflare-token "$user")
+if [ $? -ne 0 ]; then
+    rm -f $cf_conf
+    check_result $E_CONNECT "Invalid Cloudflare API token"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                              #
+#----------------------------------------------------------#
+
+# Logging
+$BIN/v-log-action "$user" "Info" "System" "Cloudflare configuration added."
+
+exit

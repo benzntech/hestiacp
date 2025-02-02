@@ -82,8 +82,77 @@
 				</label>
 				<input type="text" class="form-control" name="v_ttl" id="v_ttl" value="<?= htmlentities(trim($v_ttl, "'")) ?>">
 			</div>
+
+			<?php
+			// Check if Cloudflare is enabled for this domain
+			$cf_config = '/usr/local/hestia/data/users/'.$user.'/cloudflare/cloudflare.conf';
+			$cloudflare_enabled = file_exists($cf_config);
+			
+			if ($cloudflare_enabled) {
+				// Get zone info
+				exec(HESTIA_CMD."v-list-cloudflare-zones ".$user." json", $output, $return_var);
+				$zones = [];
+				if ($return_var == 0 && !empty($output[0])) {
+					$zones = json_decode($output[0], true);
+				}
+				
+				$domain_on_cloudflare = false;
+				foreach ($zones as $zone) {
+					if ($zone['name'] === trim($v_domain, "'")) {
+						$domain_on_cloudflare = true;
+						break;
+					}
+				}
+				
+				if ($domain_on_cloudflare && in_array($v_type, ['A', 'AAAA', 'CNAME'])) {
+					// Get current proxy status
+					$record_name = $v_rec === '@' ? trim($v_domain, "'") : trim($v_rec, "'").'.'.trim($v_domain, "'");
+					exec(HESTIA_CMD."v-list-dns-records ".$user." ".escapeshellarg(trim($v_domain, "'"))." json", $records_output, $records_return_var);
+					$proxy_enabled = false;
+					
+					if ($records_return_var == 0 && !empty($records_output[0])) {
+						$records = json_decode($records_output[0], true);
+						foreach ($records as $record) {
+							if ($record['name'] === $record_name) {
+								$proxy_enabled = isset($record['PROXIED']) && $record['PROXIED'] === 'yes';
+								break;
+							}
+						}
+					}
+					?>
+					<div class="u-mb10">
+						<label class="form-label">
+							<?=_('Cloudflare Proxy')?>
+							<span class="hint"><?=_('Enable Cloudflare proxy features (SSL, caching, DDoS protection)')?></span>
+						</label>
+						<div class="form-check">
+							<input class="form-check-input" type="checkbox" name="v_proxied" id="v_proxied" value="yes" <?php if ($proxy_enabled) echo 'checked'; ?>>
+							<label class="form-check-label" for="v_proxied">
+								<?=_('Enable Cloudflare proxy')?>
+							</label>
+						</div>
+					</div>
+					<?php
+				}
+			}
+			?>
 		</div>
 
 	</form>
 
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+	// Handle proxy checkbox state based on record type
+	const typeSelect = document.getElementById('v_type');
+	const proxyDiv = document.querySelector('div:has(> #v_proxied)');
+	
+	if (typeSelect && proxyDiv) {
+		typeSelect.addEventListener('change', function() {
+			const type = this.value;
+			proxyDiv.style.display = ['A', 'AAAA', 'CNAME'].includes(type) ? 'block' : 'none';
+		});
+	}
+});
+</script>
